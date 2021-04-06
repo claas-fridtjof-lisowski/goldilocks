@@ -15,10 +15,10 @@
 package dashboard
 
 import (
-	"net/http"
-
+	"github.com/fairwindsops/goldilocks/pkg/kube"
 	"github.com/gorilla/mux"
 	"k8s.io/klog"
+	"net/http"
 
 	"github.com/fairwindsops/goldilocks/pkg/summary"
 )
@@ -27,14 +27,37 @@ import (
 func Dashboard(opts Options) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
+		var Clusters ClusterDetails
 
 		var namespace string
 		if val, ok := vars["namespace"]; ok {
 			namespace = val
 		}
 
+		// the clusters which was submitted via dashboard ui
+		if val, ok := vars["cluster"]; ok {
+			Clusters.SubmittedCluster = val
+		}
+
+		// get all kube config contexts
+		useKubeConfig := true
+		clientCfg, err := kube.GetClientCfg(opts.kubeconfigPath)
+		if err != nil {
+			klog.Warningf("Error getting k8s client config: %v, using inClusterConfig", err)
+			useKubeConfig = false
+		}
+
+		if useKubeConfig && len(clientCfg.Contexts) > 0 {
+			Clusters.ClientCfg = clientCfg
+			Clusters.Contexts = makeContextClusterMap(clientCfg)
+			getClusterAndContext(&Clusters)
+		}
+
+		setLastCluster(Clusters.CurrentCluster, Clusters.SubmittedCluster)
+
 		// TODO [hkatz] add caching or refresh button support
 		summarizer := summary.NewSummarizer(
+			Clusters.CurrentContext,
 			summary.ForNamespace(namespace),
 			summary.ForVPAsWithLabels(opts.vpaLabels),
 			summary.ExcludeContainers(opts.excludedContainers),
@@ -43,14 +66,19 @@ func Dashboard(opts Options) http.Handler {
 		vpaData, err := summarizer.GetSummary()
 		if err != nil {
 			klog.Errorf("Error getting vpaData: %v", err)
-			http.Error(w, "Error running summary.", http.StatusInternalServerError)
-			return
 		}
+
+		data := struct {
+			Summary        summary.Summary
+			ClusterContext map[string]string
+			CurrentCluster string
+		}{Summary: vpaData, ClusterContext: Clusters.Contexts, CurrentCluster: Clusters.CurrentCluster}
 
 		tmpl, err := getTemplate("dashboard",
 			"container",
-			"namespace",
 			"dashboard",
+			"filter",
+			"namespace",
 		)
 		if err != nil {
 			klog.Errorf("Error getting template data %v", err)
@@ -58,6 +86,6 @@ func Dashboard(opts Options) http.Handler {
 			return
 		}
 
-		writeTemplate(tmpl, opts, &vpaData, w)
+		writeTemplate(tmpl, opts, &data, w)
 	})
 }

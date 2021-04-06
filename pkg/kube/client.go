@@ -16,9 +16,14 @@ package kube
 
 import (
 	"context"
-	"sync"
-
+	"github.com/matryer/resync"
+	"io/ioutil"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
+	"os"
+
 	// Empty imports needed for supported auth methods in kubeconfig. See client-go documentation
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog"
@@ -39,17 +44,57 @@ type VPAClientInstance struct {
 	Client autoscalingv1beta2.Interface
 }
 
+type ConfigContext map[string]string
+
 var kubeClient *ClientInstance
 var kubeClientVPA *VPAClientInstance
-var clientOnce sync.Once
-var clientOnceVPA sync.Once
+var clientOnce resync.Once
+var clientOnceVPA resync.Once
 
-// GetInstance returns a Kubernetes interface based on the current configuration
+// GetContexts returns a Kubernetes interface based on the current configuration
+func GetClientCfg(kubeconfigPath string) (*api.Config, error) {
+	// expand the $HOME to the full path
+	expandedPath := os.ExpandEnv(kubeconfigPath)
+
+	// Read entire file content, giving us little control but
+	// making it very simple. No need to close the file.
+	content, err := ioutil.ReadFile(expandedPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// loading all the contexts from the kube config file
+	kubeConfigData, err := clientcmd.Load(content)
+	if err != nil {
+		return nil, err
+	}
+	return kubeConfigData, nil
+}
+
+// GetInstanceWithContext returns a Kubernetes interface based on the current configuration
+func GetInstanceWithContext(context string) *ClientInstance {
+	clientOnce.Do(func() {
+		if kubeClient == nil {
+			kubeClient = &ClientInstance{
+				Client: getKubeClient(context),
+			}
+		}
+	})
+	return kubeClient
+}
+
+func ResetInstance() {
+	clientOnce.Reset()
+	clientOnceVPA.Reset()
+	kubeClient = nil
+	kubeClientVPA = nil
+}
+
 func GetInstance() *ClientInstance {
 	clientOnce.Do(func() {
 		if kubeClient == nil {
 			kubeClient = &ClientInstance{
-				Client: getKubeClient(),
+				Client: getKubeClient(""),
 			}
 		}
 	})
@@ -61,30 +106,64 @@ func GetVPAInstance() *VPAClientInstance {
 	clientOnceVPA.Do(func() {
 		if kubeClientVPA == nil {
 			kubeClientVPA = &VPAClientInstance{
-				Client: getKubeClientVPA(),
+				Client: getKubeClientVPA(""),
 			}
 		}
 	})
 	return kubeClientVPA
 }
 
-func getKubeClient() kubernetes.Interface {
-	kubeConf, err := config.GetConfig()
-	if err != nil {
-		klog.Fatalf("Error getting kubeconfig: %v", err)
+// GetVPAInstanceWithContext returns an interface for VPA based on the current configuration
+func GetVPAInstanceWithContext(context string) *VPAClientInstance {
+	clientOnceVPA.Do(func() {
+		if kubeClientVPA == nil {
+			kubeClientVPA = &VPAClientInstance{
+				Client: getKubeClientVPA(context),
+			}
+		}
+	})
+	return kubeClientVPA
+}
+
+// getKubeClient creates a Kubernetes config and client for a given kubeconfig context.
+func getKubeClient(context string) kubernetes.Interface {
+	var kubeConf *rest.Config
+	var err error
+	if context != "" {
+		kubeConf, err = config.GetConfigWithContext(context)
+		if err != nil {
+			klog.Fatalf("Error getting kubeconfig: %v", err)
+		}
+	} else {
+		kubeConf, err = config.GetConfig()
+		if err != nil {
+			klog.Fatalf("Error getting kubeconfig: %v", err)
+		}
 	}
+
 	clientset, err := kubernetes.NewForConfig(kubeConf)
 	if err != nil {
 		klog.Fatalf("Error creating kubernetes client: %v", err)
 	}
+
 	return clientset
 }
 
-func getKubeClientVPA() autoscalingv1beta2.Interface {
-	kubeConf, err := config.GetConfig()
-	if err != nil {
-		klog.Fatalf("Error getting kubeconfig: %v", err)
+func getKubeClientVPA(context string) autoscalingv1beta2.Interface {
+	var kubeConf *rest.Config
+	var err error
+	if context != "" {
+		kubeConf, err = config.GetConfigWithContext(context)
+		if err != nil {
+			klog.Fatalf("Error getting kubeconfig: %v", err)
+		}
+	} else {
+		kubeConf, err = config.GetConfig()
+		if err != nil {
+			klog.Fatalf("Error getting kubeconfig: %v", err)
+		}
 	}
+
 	clientset, err := autoscalingv1beta2.NewForConfig(kubeConf)
 	if err != nil {
 		klog.Fatalf("Error creating kubernetes client: %v", err)

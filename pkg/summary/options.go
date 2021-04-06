@@ -18,10 +18,10 @@ type options struct {
 }
 
 // defaultOptions for a Summarizer
-func defaultOptions() *options {
+func defaultOptions(context string) *options {
 	return &options{
-		kubeClient:         kube.GetInstance(),
-		vpaClient:          kube.GetVPAInstance(),
+		kubeClient:         kube.GetInstanceWithContext(context),
+		vpaClient:          kube.GetVPAInstanceWithContext(context),
 		namespace:          namespaceAllNamespaces,
 		vpaLabels:          utils.VPALabels,
 		excludedContainers: sets.NewString(),
